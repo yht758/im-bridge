@@ -64,6 +64,101 @@ def _write_json(path: Path, data: Any) -> None:
     tmp.replace(path)
 
 
+# --------------------------------------------------------------------------
+# 密钥（.env）读写 —— 界面里能改 API Key，不用再手动编辑文件
+# --------------------------------------------------------------------------
+ENV_PATH = ROOT / ".env"
+SECRET_ENV_KEYS: dict[str, str] = {
+    "api_key": "AMIS_API_KEY",
+    "asr_api_key": "AMIS_ASR_API_KEY",
+    "tts_api_key": "AMIS_TTS_API_KEY",
+    "rvc_api_key": "AMIS_RVC_API_KEY",
+}
+
+
+def _parse_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return values
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        key, _, value = line.partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
+def _mask_secret(value: str) -> str:
+    """只露头尾，够辨认是哪把钥匙，不足以还原。"""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= 8:
+        return "•" * len(text)
+    return f"{text[:4]}…{text[-4:]}"
+
+
+def read_secrets() -> dict[str, str]:
+    """返回密钥的掩码视图 + 是否已配置，供界面回显。"""
+    values = _parse_env(ENV_PATH)
+    result: dict[str, Any] = {"env_path": str(ENV_PATH)}
+    for key, env_name in SECRET_ENV_KEYS.items():
+        raw = values.get(env_name, "")
+        result[key] = _mask_secret(raw)
+        result[f"{key}_set"] = bool(raw)
+    return result
+
+
+def write_secret(key: str, value: str) -> None:
+    """把密钥写进根目录 .env（保留其他行与注释），并收紧文件权限。"""
+    if key not in SECRET_ENV_KEYS:
+        raise InstanceError(f"不支持的密钥字段：{key}")
+    text = (value or "").strip()
+    if not text:
+        raise InstanceError("密钥不能为空")
+    if any(ch in text for ch in "\r\n"):
+        raise InstanceError("密钥不能包含换行")
+
+    env_name = SECRET_ENV_KEYS[key]
+    lines: list[str] = []
+    if ENV_PATH.is_file():
+        try:
+            lines = ENV_PATH.read_text(encoding="utf-8-sig").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise InstanceError(f"读取 .env 失败：{exc}") from exc
+
+    replaced = False
+    for index, raw in enumerate(lines):
+        stripped = raw.strip()
+        probe = stripped[len("export "):].strip() if stripped.startswith("export ") else stripped
+        if not probe or probe.startswith("#") or "=" not in probe:
+            continue
+        if probe.partition("=")[0].strip() == env_name:
+            lines[index] = f"{env_name}={text}"
+            replaced = True
+    if not replaced:
+        lines.append(f"{env_name}={text}")
+
+    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = ENV_PATH.with_suffix(ENV_PATH.suffix + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tmp.replace(ENV_PATH)
+    try:
+        ENV_PATH.chmod(0o600)
+    except OSError:
+        pass
+
+
 def _normalize(record: dict, *, is_default: bool = False) -> dict:
     """补全字段，保证对外结构稳定。"""
     instance_id = str(record.get("id") or "").strip()
@@ -234,7 +329,7 @@ def write_config(instance_id: str, payload: dict) -> None:
     instance = require_instance(instance_id)
     path = config_path_of(instance)
     existing = _read_json(path, {})
-    for key in ("api_key", "asr_api_key", "tts_api_key"):
+    for key in ("api_key", "asr_api_key", "tts_api_key", "rvc_api_key"):
         payload.pop(key, None)
     existing.update(payload)
     _write_json(path, existing)

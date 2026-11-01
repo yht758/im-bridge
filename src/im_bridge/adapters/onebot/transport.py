@@ -120,3 +120,17 @@ class OneBotTransport:
                 "message": [{"type": "record", "data": {"file": file}}],
             },
         )
+
+    async def send_image(self, user_id: int, file: str) -> None:
+        """发送图片消息；``file`` 支持 http(s)、base64:// 或容器内路径。
+
+        NapCat 跑在容器里读不到宿主机临时文件，所以表情包一律用
+        ``base64://`` 内联传过去。
+        """
+        await self.call_api(
+            "send_private_msg",
+            {
+                "user_id": int(user_id),
+                "message": [{"type": "image", "data": {"file": file}}],
+            },
+        )

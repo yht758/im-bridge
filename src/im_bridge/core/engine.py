@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+import re
+
 import asyncio
 import base64
 import logging
@@ -27,7 +29,10 @@ from .commands import CommandResult, CommandRouter
 from .context import ContextManager
 from .llm import LLMClient, LLMError
 from .state import StateManager
+from .stickers import StickerService
 from .voice import SpeechSynthesizer
+from .rvc_voice import RvcVoiceConverter
+from .voice_registry import VoiceRegistry
 
 logger = logging.getLogger("im_bridge.engine")
 
@@ -48,6 +53,9 @@ class ChatEngine:
         transport: MessageTransport,
         persona: Persona,
         synthesizer: SpeechSynthesizer | None = None,
+        stickers: StickerService | None = None,
+        rvc_converter: RvcVoiceConverter | None = None,
+        voice_registry: VoiceRegistry | None = None,
         logger_: logging.Logger | None = None,
     ) -> None:
         self.config = config
@@ -57,9 +65,15 @@ class ChatEngine:
         self.transport = transport
         self.persona = persona
         self.synthesizer = synthesizer
+        self.stickers = stickers
+        self.rvc_converter = rvc_converter
+        self.voice_registry = voice_registry
         self.logger = logger_ or logger
         self.started_at = datetime.now()
-        self.commands = CommandRouter(config, state_manager, context_manager, self.started_at)
+        self.commands = CommandRouter(
+            config, state_manager, context_manager, self.started_at,
+            voice_registry=self.voice_registry,
+        )
         self._rng = random.Random()
 
     # ---------- 入口 ----------
@@ -95,7 +109,7 @@ class ChatEngine:
         try:
             await self.context.maybe_compress(user_id, self.llm)
             self.context.append_user(user_id, text)
-            messages = self.context.build_messages(user_id, self.persona.system_prompt)
+            messages = self.context.build_messages(user_id, self._system_prompt())
 
             self.logger.info("[%s(%s)]: %s", nickname or "用户", user_id, text)
             reply = await self._reply(uid, messages)
@@ -103,7 +117,7 @@ class ChatEngine:
             self.context.append_assistant(user_id, reply)
             append_log("answers.log", f"[{nickname}({user_id})] {reply}")
             self.logger.info("[回复->%s]: %s", nickname or user_id, reply[:80])
-            await self._send_voice(uid, reply)
+            await self._maybe_send_voice(uid, messages, reply)
             return False
 
         except LLMError as exc:
@@ -124,41 +138,166 @@ class ChatEngine:
         except Exception as exc:  # noqa: BLE001
             self.logger.error("发送消息失败：%s", exc)
 
-    async def _send_voice(self, user_id: int, text: str) -> None:
-        """可选：把文本回复合成语音一并发出（失败绝不影响文字回复）。"""
+    def _system_prompt(self) -> str:
+        """人设提示词 + 可选的表情包规则（没有素材时规则为空）。"""
+        prompt = self.persona.system_prompt
+        if self.stickers is not None and self.stickers.enabled:
+            rules = self.stickers.rules_prompt
+            if rules:
+                prompt = prompt + rules
+        return prompt
+
+    @staticmethod
+    def _wants_sticker(messages: list[dict]) -> bool:
+        """用户这句话是不是在直接索要表情包（要了就必发）。"""
+        pattern = re.compile(r"表情包|表情|斗图|梗图|贴图|发.{0,3}图|来.{0,2}图")
+        for message in reversed(messages or []):
+            if str(message.get("role") or "") != "user":
+                continue
+            return bool(pattern.search(str(message.get("content") or "")))
+        return False
+
+    async def _maybe_send_sticker(self, user_id: int, tags: list[str], force: bool = False) -> None:
+        """按概率/频控发一张表情；失败只记日志，绝不影响文字回复。"""
+        if self.stickers is None or not self.stickers.enabled or not tags:
+            return
+        if not hasattr(self.transport, "send_image"):
+            self.logger.warning("当前传输层不支持发送图片，跳过表情")
+            return
+        try:
+            self.logger.info("[表情] 回复携带标签 %s（force=%s）", tags, force)
+            encoded = self.stickers.choose(str(user_id), tags, force=force)
+            if not encoded:
+                self.logger.info("[表情] 未发送，原因：%s", self.stickers.last_reason or "unknown")
+                return
+            await self.transport.send_image(user_id, encoded)
+            self.logger.info("[表情->%s] 已发送（%.1f KB）", user_id, len(encoded) / 1024)
+        except Exception as exc:  # noqa: BLE001 - 表情是锦上添花
+            self.logger.warning("发送表情失败：%s", exc)
+
+    async def _maybe_send_voice(
+        self, user_id: int, messages: list[dict], reply: str
+    ) -> None:
+        """按概率补发一条语音：内容另生成，不重复文字回复。
+
+        - 概率闸门在生成之前，避免白花一次 LLM 调用；
+        - 语音文案结合上文单独生成，读出来的是「补一句」，不是把回复再念一遍；
+        - 任何失败只记 warning，绝不影响已经发出去的文字。
+        """
         if not self.config.voice_reply_enabled:
             return
         if self.synthesizer is None or not self.synthesizer.enabled:
             return
         if not hasattr(self.transport, "send_record"):
-            self.logger.warning("当前传输层不支持发送语音，跳过语音回复")
+            self.logger.debug("当前传输层不支持发送语音，跳过语音回复")
+            return
+        if not (reply or "").strip():
             return
 
-        text = (text or "").strip()
-        if not text:
+        probability = float(getattr(self.config, "voice_reply_probability", 0.0) or 0.0)
+        if probability <= 0:
+            return
+        if probability < 1.0 and random.random() > probability:
+            self.logger.info("[语音] 本次未命中概率（p=%.2f）", probability)
+            return
+
+        voice_mode = getattr(self.config, "voice_mode", "rvc")
+        rvc_ready = False
+        if self.rvc_converter is not None and getattr(self.config, "rvc_enabled", False):
+            rvc_ready = await asyncio.to_thread(self.rvc_converter.is_available)
+        fallback = (getattr(self.config, "rvc_fallback", "off") or "off").lower()
+        if voice_mode != "cloud_tts" and not rvc_ready and fallback != "cloud":
+            self.logger.info("[语音] 本地 RVC 离线或已关闭，只发文字")
+            return
+
+        line = await self._generate_voice_line(messages, reply)
+        if not line:
             return
 
         try:
             with tempfile.TemporaryDirectory(prefix="im-bridge-voice-") as tmp:
                 out = Path(tmp) / "reply.mp3"
-                path = await self.synthesizer.synthesize(text, out)
+                path = await self.synthesizer.synthesize(line, out)
                 if path is None:
                     return
-                data = path.read_bytes()
-                if len(data) > 5 * 1024 * 1024:
+                base_data = path.read_bytes()
+                if len(base_data) > 5 * 1024 * 1024:
                     self.logger.warning("合成语音超过 5MB，放弃发送")
                     return
-                # NapCat 跑在容器里读不到宿主机临时路径，用 base64 内联传输
+
+                # 本地 RVC 变声：本机引擎可用时，把基础音色转成注册音色
+                final_path = path
+                used_rvc = False
+                if voice_mode == "rvc" and self.rvc_converter is not None and getattr(self.config, "rvc_enabled", False):
+                    if rvc_ready:
+                        converted = await self.rvc_converter.convert_async(path, None)
+                        if converted is not None:
+                            final_path = converted
+                            used_rvc = True
+                        else:
+                            self.logger.warning("[语音] RVC 转换失败，按回退策略处理")
+                    else:
+                        self.logger.info(
+                            "[语音] 本机 RVC 不可用（电脑可能未开），回退：%s",
+                            getattr(self.config, "rvc_fallback", "off"),
+                        )
+
+                # 回退策略：未使用 RVC 且回退为 off 时，本次不发语音
+                fallback = (getattr(self.config, "rvc_fallback", "off") or "off").lower()
+                if voice_mode == "rvc" and not used_rvc and fallback != "cloud":
+                    self.logger.info("[语音] 回退策略为 off，本次不发语音")
+                    return
+
+                data = final_path.read_bytes()
                 encoded = "base64://" + base64.b64encode(data).decode("ascii")
                 await self.transport.send_record(user_id, encoded)
-                self.logger.info("[语音->%s] 已发送 %.1f KB", user_id, len(data) / 1024)
+                self.logger.info(
+                    "[语音->%s] %s（%.1f KB，RVC=%s）",
+                    user_id, line[:20], len(data) / 1024, used_rvc,
+                )
         except Exception as exc:  # noqa: BLE001 - 语音是锦上添花，失败不影响文字
             self.logger.warning("发送语音失败：%s", exc)
 
+    async def _generate_voice_line(self, messages: list[dict], reply: str) -> str:
+        """结合上下文另写一句语音文案，明确要求不复述刚才的文字回复。"""
+        system_prompt = (
+            f"{self._system_prompt()}\n\n---\n"
+            "你现在要补发一条【语音消息】。这句话会被念出来，所以：\n"
+            "1. 不要重复、也不要改写你刚发的那段文字，换一个角度补一句；\n"
+            "2. 顺着当前聊天内容说，具体、自然，像真人随口补的一句；\n"
+            "3. 不超过 30 个字，不带表情符号、不带 Markdown、不用引号；\n"
+            "4. 只输出这句话本身。"
+        )
+        history = list(messages or [])
+        if history and str(history[0].get("role")) == "system":
+            history = history[1:]
+        convo = list(history)
+        if reply.strip():
+            convo.append({"role": "assistant", "content": reply.strip()})
+        convo.append({"role": "user", "content": "（补一条语音，别重复上面的话。）"})
+        try:
+            raw = await self.llm.complete([{"role": "system", "content": system_prompt}, *convo])
+        except LLMError as exc:
+            self.logger.warning("生成语音文案失败：%s", exc)
+            return ""
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("生成语音文案异常：%s", exc)
+            return ""
+
+        cleaned = (raw or "").strip().splitlines()[0].strip().strip("“”\"'「」『』 ")
+        if len(cleaned) > 30:
+            cleaned = cleaned[:30].rstrip("，,、；;：:。.!！?？ ")
+        return cleaned
+
     # ---------- 回复生成 ----------
     async def _reply(self, user_id: int, messages: list[dict]) -> str:
-        """生成并发送回复，返回完整回复文本（用于写入上下文）。"""
+        """生成并发送回复，返回完整回复文本（已剥离表情标记，用于写入上下文）。"""
         sent = 0
+        tag_filter = (
+            self.stickers.new_filter()
+            if self.stickers is not None and self.stickers.enabled
+            else None
+        )
 
         if self.config.streaming_enabled:
             full: list[str] = []
@@ -166,6 +305,10 @@ class ChatEngine:
             stream_failed = False
             try:
                 async for delta in self.llm.stream(messages):
+                    if tag_filter is not None:
+                        delta = tag_filter.feed(delta)
+                    if not delta:
+                        continue
                     full.append(delta)
                     if self.config.chunking_enabled:
                         for chunk in streamer.feed(delta):
@@ -173,6 +316,14 @@ class ChatEngine:
             except LLMError as exc:
                 stream_failed = True
                 self.logger.warning("流式生成中断：%s", exc)
+
+            if tag_filter is not None:
+                tail = tag_filter.flush()
+                if tail:
+                    full.append(tail)
+                    if self.config.chunking_enabled:
+                        for chunk in streamer.feed(tail):
+                            sent += await self._send_piece(user_id, chunk, sent)
 
             reply = "".join(full).strip()
             if reply:
@@ -182,12 +333,21 @@ class ChatEngine:
                 else:
                     # 关闭分片：流式只用于降低首字延迟，内容按平台上限拆条发送
                     sent += await self._send_piece(user_id, reply, sent)
+                await self._maybe_send_sticker(
+                    user_id,
+                    tag_filter.tags if tag_filter is not None else [],
+                    force=self._wants_sticker(messages),
+                )
                 return reply
 
             # 没有任何内容：可能是端点不支持 SSE，回退为一次性补全
             self.logger.warning("流式未产出内容，回退一次性补全（stream_failed=%s）", stream_failed)
 
-        reply = await self.llm.complete(messages)
+        raw = await self.llm.complete(messages)
+        tags: list[str] = []
+        reply = raw
+        if self.stickers is not None and self.stickers.enabled:
+            reply, tags = self.stickers.parse(raw)
 
         if self.config.chunking_enabled:
             for chunk in split_chunks(
@@ -196,6 +356,7 @@ class ChatEngine:
                 sent += await self._send_piece(user_id, chunk, sent)
         else:
             sent += await self._send_piece(user_id, reply, sent)
+        await self._maybe_send_sticker(user_id, tags, force=self._wants_sticker(messages))
         return reply
 
     async def _send_piece(self, user_id: int, text: str, sent_count: int) -> int:

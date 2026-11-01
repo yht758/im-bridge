@@ -200,6 +200,11 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
         label="触发摘要的 token 估算阈值",
         hint="中文约 1 字≈1 token，建议 1200~3000", minimum=200, example="1800",
     ),
+    FieldSpec(
+        env="AMIS_USAGE_ENABLED", key="usage_enabled", attr="usage_enabled",
+        kind="bool", default=True, label="是否记录 token 用量",
+        hint="开启后写入 data/usage/，供桌面端统计花费", example="true",
+    ),
     # ---------- 主动会话（Issue #4） ----------
     FieldSpec(
         env="AMIS_PROACTIVE_ENABLED", key="proactive_enabled", attr="proactive_enabled",
@@ -224,6 +229,20 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
         label="静默时段（不主动打扰）",
         hint="格式 HH:MM-HH:MM，可跨零点；留空表示不限制", example="23:00-08:00",
     ),
+    FieldSpec(
+        env="AMIS_PROACTIVE_TARGETS", key="proactive_targets", attr="proactive_targets",
+        kind="id_list", default=(), label="主动对话对象",
+        hint="逗号分隔的 QQ 号，只给名单里的人主动发消息；"
+             "留空表示不主动发，避免打扰不熟的好友",
+        example="10001,10002",
+    ),
+    FieldSpec(
+        env="AMIS_PROACTIVE_JITTER_MINUTES", key="proactive_jitter_minutes",
+        attr="proactive_jitter_minutes", kind="int", default=120,
+        label="主动消息随机延迟（分钟）",
+        hint="到了闲置阈值后再随机等 0~该分钟数才开口，避免每天同一时刻像定时任务",
+        minimum=0, maximum=720, example="120",
+    ),
     # ---------- 语音（Issue #5） ----------
     FieldSpec(
         env="AMIS_VOICE_INPUT_ENABLED", key="voice_input_enabled", attr="voice_input_enabled",
@@ -246,6 +265,13 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
         hint="留空则复用 AMIS_API_KEY", example="",
     ),
     FieldSpec(
+        env="AMIS_VOICE_REPLY_PROBABILITY", key="voice_reply_probability",
+        attr="voice_reply_probability", kind="float", default=0.35,
+        label="语音回复概率",
+        hint="0~1；每条文字回复后按该概率补发一条语音，0 表示不发",
+        minimum=0, maximum=1, example="0.35",
+    ),
+    FieldSpec(
         env="AMIS_TTS_ENDPOINT", key="tts_endpoint", attr="tts_endpoint", kind="str",
         default="", label="语音合成接口地址",
         hint="OpenAI 兼容的 /v1/audio/speech 地址", example="",
@@ -254,6 +280,18 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
         env="AMIS_TTS_API_KEY", key="tts_api_key", attr="tts_api_key", kind="secret",
         default="", label="语音合成 API Key",
         hint="留空则复用 AMIS_API_KEY", example="",
+    ),
+    FieldSpec(
+        env="AMIS_TTS_MODEL", key="tts_model", attr="tts_model", kind="str",
+        default="tts-1", label="语音合成模型",
+        hint="OpenAI 填 tts-1；硅基流动填 FunAudioLLM/CosyVoice2-0.5B，按服务商文档照抄",
+        example="tts-1",
+    ),
+    FieldSpec(
+        env="AMIS_TTS_VOICE", key="tts_voice", attr="tts_voice", kind="str",
+        default="alloy", label="语音音色",
+        hint="模型支持的音色名，如 alloy / nova / alex；填错会返回 400",
+        example="alloy",
     ),
     FieldSpec(
         env="AMIS_VOICE_MAX_SECONDS", key="voice_max_seconds", attr="voice_max_seconds",
@@ -268,9 +306,123 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
         example="/app/.config/QQ=/www/wwwroot/napcat/qq",
     ),
     FieldSpec(
+        env="AMIS_RVC_ENDPOINT", key="rvc_endpoint", attr="rvc_endpoint", kind="str",
+        default="", label="RVC HTTP 桥接地址", hint="SSH 隧道地址；留空使用同机子进程", example="",
+    ),
+    FieldSpec(
+        env="AMIS_RVC_API_KEY", key="rvc_api_key", attr="rvc_api_key", kind="secret",
+        default="", label="RVC 连接密钥", example="",
+    ),
+    FieldSpec(env="AMIS_VOICE_MODE", key="voice_mode", attr="voice_mode", kind="str",
+              default='local_tts', label='语音来源', hint='local_tts=本机直接合成；rvc=云端底音加本机变声；cloud_tts=云端合成', example=""),
+    FieldSpec(env="AMIS_LOCAL_TTS_PYTHON", key="local_tts_python", attr="local_tts_python", kind="str",
+              default='', label='本地合成解释器', hint='GPT-SoVITS 独立 Python 环境', example=""),
+    FieldSpec(env="AMIS_LOCAL_TTS_SCRIPT", key="local_tts_script", attr="local_tts_script", kind="str",
+              default='', label='本地合成 API 脚本', hint='提供 /health 和 /tts 的本机 API 脚本', example=""),
+    # ---------- RVC 本地变声后端（用户自定义音色 / 本机开机时启用） ----------
+    FieldSpec(
+        env="AMIS_RVC_ENABLED", key="rvc_enabled", attr="rvc_enabled", kind="bool",
+        default=True, label="是否启用 RVC 本地变声",
+        hint="开启后本机可用时，语音回复会经 RVC 转成注册音色；"
+             "本机不可用时按 AMIS_RVC_FALLBACK 回退",
+        example="true",
+    ),
+    FieldSpec(
+        env="AMIS_RVC_FALLBACK", key="rvc_fallback", attr="rvc_fallback", kind="str",
+        default="off", label="本机不可用时的回退策略",
+        hint="cloud=改用云 TTS 音色；off=不发语音", example="cloud",
+    ),
+    FieldSpec(
+        env="AMIS_RVC_CONVERT_SCRIPT", key="rvc_convert_script", attr="rvc_convert_script",
+        kind="str", default="",
+        label="RVC 转换脚本路径",
+        hint="指向 aemeath_vc/convert.py（脚本自带 rvc 引擎引用）",
+        example="",
+    ),
+    FieldSpec(
+        env="AMIS_RVC_PYTHON", key="rvc_python", attr="rvc_python", kind="str",
+        default="",
+        label="RVC 引擎 Python 解释器",
+        hint="运行转换脚本的解释器（独立 venv，含 torch cu128）",
+        example="",
+    ),
+    FieldSpec(
+        env="AMIS_RVC_DEFAULT_VOICE", key="rvc_default_voice", attr="rvc_default_voice",
+        kind="str", default="aemeath", label="默认本地音色 ID",
+        hint="voices 注册表中的音色 id，/voice use 可切换", example="aemeath",
+    ),
+    FieldSpec(
+        env="AMIS_RVC_INDEX_RATE", key="rvc_index_rate", attr="rvc_index_rate", kind="float",
+        default=0.75, label="特征索引强度", minimum=0, maximum=1, example="0.75",
+    ),
+    FieldSpec(
+        env="AMIS_RVC_F0_METHOD", key="rvc_f0_method", attr="rvc_f0_method", kind="str",
+        default="rmvpe", label="音高提取算法", hint="rmvpe 或 pm", example="rmvpe",
+    ),
+    FieldSpec(
+        env="AMIS_RVC_PITCH", key="rvc_pitch", attr="rvc_pitch", kind="int",
+        default=0, label="变调半音数", example="0",
+    ),
+    FieldSpec(
+        env="AMIS_RVC_DEVICE", key="rvc_device", attr="rvc_device", kind="str",
+        default="auto", label="RVC 推理设备", hint="auto / gpu / cpu", example="auto",
+    ),
+    FieldSpec(
+        env="AMIS_IMAGE_INPUT_ENABLED", key="image_input_enabled", attr="image_input_enabled",
+        kind="bool", default=True, label="图片识别开关",
+        hint="开启后入站图片会先转成文字描述再交给模型；接口不支持视觉请关闭",
+        example="true",
+    ),
+    FieldSpec(
+        env="AMIS_VISION_ENDPOINT", key="vision_endpoint", attr="vision_endpoint",
+        kind="str", default="", label="图片识别接口地址",
+        hint="OpenAI 兼容接口，只写到 /v1 为止；留空则复用 AMIS_BASE_URL", example="",
+    ),
+    FieldSpec(
+        env="AMIS_VISION_API_KEY", key="vision_api_key", attr="vision_api_key",
+        kind="secret", default="", label="图片识别 API Key",
+        hint="留空则复用 AMIS_API_KEY", example="",
+    ),
+    FieldSpec(
+        env="AMIS_VISION_MODEL", key="vision_model", attr="vision_model", kind="str",
+        default="", label="图片识别模型",
+        hint="留空则复用 AMIS_MODEL；模型必须支持图片输入", example="",
+    ),
+    FieldSpec(
+        env="AMIS_VISION_MAX_BYTES", key="vision_max_bytes", attr="vision_max_bytes",
+        kind="int", default=8_000_000, label="图片体积上限（字节）",
+        hint="超过该大小的图片直接跳过识别，避免超时与费用失控",
+        minimum=1024, example="8000000",
+    ),
+    FieldSpec(
+        env="AMIS_IMAGE_MAX_COUNT", key="image_max_count", attr="image_max_count",
+        kind="int", default=4, label="单条消息最多识别图片数",
+        hint="一次发多张图时只识别前 N 张", minimum=1, example="4",
+    ),
+    FieldSpec(
         env="AMIS_PERSONA", key="persona", attr="persona", kind="str",
         default=DEFAULT_PERSONA, label="人设",
         hint="内置 aemeath，也可填 .txt/.md 提示词文件路径", example=DEFAULT_PERSONA,
+    ),
+    FieldSpec(
+        env="AMIS_STICKER_ENABLED", key="sticker_enabled", attr="sticker_enabled",
+        kind="bool", default=False, label="表情包开关",
+        hint="开启后从 data/stickers 随机发送表情，默认关闭", example="false",
+    ),
+    FieldSpec(
+        env="AMIS_STICKER_PROBABILITY", key="sticker_probability", attr="sticker_probability",
+        kind="float", default=0.25, label="表情发送概率",
+        hint="0~1；模型给出 [[表情:标签]] 后再按该概率决定是否真的发", example="0.25",
+    ),
+    FieldSpec(
+        env="AMIS_STICKER_COOLDOWN", key="sticker_cooldown", attr="sticker_cooldown",
+        kind="int", default=180, label="表情冷却（秒）",
+        hint="两条表情之间至少间隔多少秒", minimum=0, example="180",
+    ),
+    FieldSpec(
+        env="AMIS_STICKER_MAX_PER_DAY", key="sticker_max_per_day", attr="sticker_max_per_day",
+        kind="int", default=30, label="每人每日表情上限",
+        hint="超过后当天不再发送表情", minimum=0, example="30",
     ),
 )
 
@@ -382,11 +534,33 @@ def _as_float(value: object, spec: FieldSpec, source: str, issues: list[ConfigIs
 
 
 def _as_id_list(value: object, spec: FieldSpec, source: str, issues: list[ConfigIssue]) -> list[str]:
-    """把列表或逗号分隔字符串统一成字符串 ID 列表。"""
+    """把列表、逗号分隔字符串、或「字符串形式的列表」统一成字符串 ID 列表。
+
+    兼容历史数据：管理台保存时曾把 ``["123"]`` 写成字符串 ``'["123"]'`` /
+    ``"['123']"``，直接按逗号分割会把它当成一个非法 QQ 号，导致启动校验失败。
+    """
     if value is None or value == "":
         return []
     if isinstance(value, str):
-        items = value.split(",")
+        text = value.strip()
+        items: list[str]
+        if text.startswith("[") and text.endswith("]"):
+            parsed: object = None
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                try:
+                    import ast
+
+                    parsed = ast.literal_eval(text)
+                except (ValueError, SyntaxError):
+                    parsed = None
+            if isinstance(parsed, (list, tuple)):
+                items = [str(item) for item in parsed]
+            else:
+                items = text.split(",")
+        else:
+            items = text.split(",")
     elif isinstance(value, (list, tuple, set)):
         items = list(value)
     else:
@@ -447,18 +621,48 @@ class Config:
         message_max_chars: int = 1000,
         summary_async: bool = True,
         summary_token_threshold: int = 1800,
+        usage_enabled: bool = True,
         proactive_enabled: bool = False,
         proactive_idle_hours: float = 24.0,
         proactive_max_per_day: int = 1,
         proactive_quiet_hours: str = "23:00-08:00",
+        proactive_targets: list[str] | None = None,
+        proactive_jitter_minutes: int = 120,
         voice_input_enabled: bool = False,
         voice_reply_enabled: bool = False,
+        voice_reply_probability: float = 0.35,
         asr_endpoint: str = "",
         asr_api_key: str = "",
         tts_endpoint: str = "",
         tts_api_key: str = "",
+        tts_model: str = "tts-1",
+        tts_voice: str = "alloy",
         voice_max_seconds: int = 60,
         voice_path_map: str = "",
+        voice_mode: str = 'local_tts',
+        local_tts_python: str = '',
+        local_tts_script: str = '',
+        rvc_endpoint: str = "",
+        rvc_api_key: str = "",
+        rvc_enabled: bool = True,
+        rvc_fallback: str = "off",
+        rvc_convert_script: str = "",
+        rvc_python: str = "",
+        rvc_default_voice: str = "aemeath",
+        rvc_index_rate: float = 0.75,
+        rvc_f0_method: str = "rmvpe",
+        rvc_pitch: int = 0,
+        rvc_device: str = "auto",
+        image_input_enabled: bool = True,
+        vision_endpoint: str = "",
+        vision_api_key: str = "",
+        vision_model: str = "",
+        vision_max_bytes: int = 8_000_000,
+        image_max_count: int = 4,
+        sticker_enabled: bool = False,
+        sticker_probability: float = 0.25,
+        sticker_cooldown: int = 180,
+        sticker_max_per_day: int = 30,
         persona: str = DEFAULT_PERSONA,
         data_dir: Path | str | None = None,
         config_path: Path | None = None,
@@ -485,18 +689,48 @@ class Config:
         self.message_max_chars = message_max_chars
         self.summary_async = summary_async
         self.summary_token_threshold = summary_token_threshold
+        self.usage_enabled = usage_enabled
         self.proactive_enabled = proactive_enabled
         self.proactive_idle_hours = proactive_idle_hours
         self.proactive_max_per_day = proactive_max_per_day
         self.proactive_quiet_hours = proactive_quiet_hours
+        self.proactive_targets = proactive_targets or []
+        self.proactive_jitter_minutes = proactive_jitter_minutes
         self.voice_input_enabled = voice_input_enabled
         self.voice_reply_enabled = voice_reply_enabled
+        self.voice_reply_probability = voice_reply_probability
         self.asr_endpoint = asr_endpoint
         self.asr_api_key = asr_api_key
         self.tts_endpoint = tts_endpoint
         self.tts_api_key = tts_api_key
+        self.tts_model = tts_model
+        self.tts_voice = tts_voice
         self.voice_max_seconds = voice_max_seconds
         self.voice_path_map = voice_path_map
+        self.voice_mode = voice_mode
+        self.local_tts_python = local_tts_python
+        self.local_tts_script = local_tts_script
+        self.rvc_endpoint = rvc_endpoint.strip()
+        self.rvc_api_key = rvc_api_key
+        self.rvc_enabled = rvc_enabled
+        self.rvc_fallback = (rvc_fallback or "off").strip().lower()
+        self.rvc_convert_script = rvc_convert_script
+        self.rvc_python = rvc_python
+        self.rvc_default_voice = rvc_default_voice
+        self.rvc_index_rate = rvc_index_rate
+        self.rvc_f0_method = rvc_f0_method
+        self.rvc_pitch = rvc_pitch
+        self.rvc_device = (rvc_device or "auto").strip().lower()
+        self.image_input_enabled = image_input_enabled
+        self.vision_endpoint = vision_endpoint
+        self.vision_api_key = vision_api_key
+        self.vision_model = vision_model
+        self.vision_max_bytes = vision_max_bytes
+        self.image_max_count = image_max_count
+        self.sticker_enabled = sticker_enabled
+        self.sticker_probability = sticker_probability
+        self.sticker_cooldown = sticker_cooldown
+        self.sticker_max_per_day = sticker_max_per_day
         self.persona = persona
         # 数据目录：多实例下每实例独立（data/<id>），单实例沿用根 data/
         self.data_dir = Path(data_dir) if data_dir else DATA_DIR

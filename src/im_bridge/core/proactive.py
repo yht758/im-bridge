@@ -8,11 +8,13 @@
 
 触发条件（全部满足才发）：
 1. ``config.proactive_enabled`` 为 True；
-2. 该用户已存在于 ``StateManager`` 且 ``last_interact_ts > 0``；
-3. 闲置时长 ``now - last_interact_ts >= proactive_idle_hours``；
-4. 当前北京时间不在 ``proactive_quiet_hours`` 静默区间内（支持跨零点）；
-5. 当日（北京时间自然日）主动条数未达 ``proactive_max_per_day``；
-6. 距该用户上次触达尝试已超过 ``COOLDOWN_SECONDS``（6 小时）。
+2. 该用户在 ``config.proactive_targets`` 名单里（留空则一个都不发）；
+3. 该用户已存在于 ``StateManager`` 且 ``last_interact_ts > 0``；
+4. 闲置时长 ``now - last_interact_ts >= proactive_idle_hours``；
+5. 过了本次随机延迟 ``proactive_jitter_minutes`` 内摇出的到期时刻；
+6. 当前北京时间不在 ``proactive_quiet_hours`` 静默区间内（支持跨零点）；
+7. 当日（北京时间自然日）主动条数未达 ``proactive_max_per_day``；
+8. 距该用户上次触达尝试已超过 ``COOLDOWN_SECONDS``（6 小时）。
 
 失败策略：单个用户失败只跳过该用户，不重试、不影响其他人；
 ``stop()`` 之后不再发送。
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from datetime import datetime
 from typing import Any, Callable
 
@@ -39,8 +42,9 @@ MAX_OPENER_CHARS = 30
 OPENER_SYSTEM_PROMPT = (
     "你正在私聊窗口里主动给对方发一条消息，而不是回复对方。\n"
     "对方昵称：{nickname}\n"
-    "下面可能带有你们之前的聊天记录，可以用来自然接上话题，"
-    "但绝对不要复述、总结或引用这些记录。\n"
+    "距上次聊天：{gap}\n"
+    "下面带有你们之前的聊天记录，请优先顺着上次没聊完的那件事说一句；"
+    "只有确实接不上时，才换一个轻松的新话题。不要复述、总结或引用记录原文。\n"
     "要求：\n"
     "1. 只输出一句中文口语，最多 {max_chars} 个字；\n"
     "2. 像真人随手发出的一条消息：具体、自然，可以问候近况、"
@@ -133,6 +137,7 @@ class ProactiveScheduler:
         logger: logging.Logger | None = None,
         loop_interval: float = 300.0,
         persona_prompt: str = "",
+        rng: random.Random | None = None,
     ) -> None:
         self._config = config
         self._llm = llm
@@ -144,6 +149,8 @@ class ProactiveScheduler:
         self.loop_interval = max(0.01, float(loop_interval))
         # 主动开场白同样要带上人设，否则语气会和正常回复割裂
         self._persona_prompt = (persona_prompt or "").strip()
+        # 随机延迟用独立 RNG，测试可注入固定种子
+        self._rng = rng or random.Random()
 
         self._task: asyncio.Task | None = None
         self._closed = False
@@ -152,6 +159,8 @@ class ProactiveScheduler:
         self._last_attempt: dict[str, float] = {}
         # 记账：用户 -> (北京日期 YYYY-MM-DD, 当日已发条数)
         self._daily: dict[str, tuple[str, int]] = {}
+        # 记账：用户 -> 本次开口的随机到期时间（到了才发，发完/跳过即重新摇）
+        self._next_due: dict[str, float] = {}
 
     # ---------- 生命周期 ----------
     async def start(self) -> None:
@@ -213,10 +222,27 @@ class ProactiveScheduler:
         idle_hours = float(getattr(self._config, "proactive_idle_hours", 24.0) or 0.0)
         idle_seconds = max(0.0, idle_hours * 3600)
 
+        # 只给名单里的人发：留空一个都不发，避免误发给不相关的 Q 好友
+        targets = {
+            str(item).strip()
+            for item in (getattr(self._config, "proactive_targets", None) or [])
+            if str(item).strip()
+        }
+        if not targets:
+            self._logger.debug("未配置主动对话对象（AMIS_PROACTIVE_TARGETS），跳过本轮")
+            return []
+
+        # 到点后再随机等 0~jitter，避免每天同一时刻发、像定时任务
+        jitter_seconds = max(
+            0.0, float(getattr(self._config, "proactive_jitter_minutes", 0) or 0.0) * 60.0
+        )
+
         sent: list[str] = []
         for user_id in self._existing_user_ids():
             if self._closed:
                 break
+            if user_id not in targets:
+                continue
             state = self._state.get(user_id)
             if state is None:
                 continue
@@ -224,17 +250,31 @@ class ProactiveScheduler:
             if last_interact <= 0:
                 continue
             if now - last_interact < idle_seconds:
+                # 又聊过了：本次随机窗口作废，下次闲置重新摇
+                self._next_due.pop(user_id, None)
+                continue
+            if now < self._due_at(user_id, now, jitter_seconds):
                 continue
 
             last_attempt = self._last_attempt.get(user_id)
             if last_attempt is not None and now - last_attempt < COOLDOWN_SECONDS:
+                self._next_due.pop(user_id, None)
                 continue
             if self._daily_count(user_id, now) >= max_per_day:
+                self._next_due.pop(user_id, None)
                 continue
 
             if await self._reach_out(user_id, state, now):
                 sent.append(user_id)
         return sent
+
+    def _due_at(self, user_id: str, now: float, jitter_seconds: float) -> float:
+        """本次开口的随机到期时间：首次进入可发窗口时摇一次，之后固定到发出为止。"""
+        due = self._next_due.get(user_id)
+        if due is None:
+            due = now + (self._rng.uniform(0.0, jitter_seconds) if jitter_seconds > 0 else 0.0)
+            self._next_due[user_id] = due
+        return due
 
     # ---------- 单用户触达 ----------
     async def _reach_out(self, user_id: str, state: Any, now: float) -> bool:
@@ -247,9 +287,11 @@ class ProactiveScheduler:
 
         # 先占冷却：失败也不在每个 tick 重复重试
         self._last_attempt[user_id] = now
+        # 本次随机窗口用掉了，下次重新摇
+        self._next_due.pop(user_id, None)
 
         try:
-            text = await self._generate_opener(user_id, state)
+            text = await self._generate_opener(user_id, state, now)
         except asyncio.CancelledError:
             raise
         except LLMError as exc:
@@ -278,10 +320,13 @@ class ProactiveScheduler:
         self._logger.info("已向用户 %s 主动发送：%s", user_id, text)
         return True
 
-    async def _generate_opener(self, user_id: str, state: Any) -> str:
+    async def _generate_opener(self, user_id: str, state: Any, now: float) -> str:
         nickname = str(getattr(state, "nickname", "") or "").strip() or _FALLBACK_NICKNAME
+        last_interact = float(getattr(state, "last_interact_ts", 0.0) or 0.0)
         task_prompt = OPENER_SYSTEM_PROMPT.format(
-            nickname=nickname, max_chars=MAX_OPENER_CHARS
+            nickname=nickname,
+            gap=self._gap_text(now, last_interact),
+            max_chars=MAX_OPENER_CHARS,
         )
         # 人设在前、本次任务在后：保留角色语气，同时让"主动开口"这条指令优先
         system_prompt = (
@@ -310,6 +355,22 @@ class ProactiveScheduler:
     def _minute_of_day(now: float) -> int:
         beijing = datetime.fromtimestamp(now, CST)
         return beijing.hour * 60 + beijing.minute
+
+    @staticmethod
+    def _gap_text(now: float, last_interact: float) -> str:
+        """把「多久没聊」说成人话，模型据此决定语气的亲疏。"""
+        if last_interact <= 0:
+            return "不清楚"
+        seconds = max(0.0, now - last_interact)
+        hours = seconds / 3600
+        if hours < 1:
+            return "不到 1 小时前"
+        if hours < 24:
+            return f"大约 {int(hours)} 小时前"
+        days = hours / 24
+        if days < 30:
+            return f"大约 {int(days)} 天前"
+        return f"已经一个多月（约 {int(days)} 天）"
 
     @staticmethod
     def _day_key(now: float) -> str:

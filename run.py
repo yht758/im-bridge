@@ -1,3 +1,4 @@
+# im-bridge 3.0: configure your own endpoint and account before starting.
 """
 项目入口。
 

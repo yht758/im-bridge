@@ -66,6 +66,30 @@ def patch_client(cls, fake: FakeAsyncClient):
     return patch.object(cls, "_client", lambda self: fake)
 
 
+class TTSSettingsTest(unittest.TestCase):
+    """模型名与音色必须可配，否则国产兼容服务的 model/voice 对不上就只能报 400。"""
+
+    def test_defaults(self):
+        from im_bridge.config import Config
+
+        config = Config()
+        self.assertEqual(config.tts_model, "tts-1")
+        self.assertEqual(config.tts_voice, "alloy")
+
+    def test_override_reaches_payload(self):
+        from im_bridge.config import Config
+
+        config = Config(tts_model="FunAudioLLM/CosyVoice2-0.5B", tts_voice="alex")
+        synth = SpeechSynthesizer(
+            endpoint="https://tts.local/v1",
+            api_key=FAKE_KEY,
+            model=config.tts_model,
+            voice=config.tts_voice,
+        )
+        self.assertEqual(synth.model, "FunAudioLLM/CosyVoice2-0.5B")
+        self.assertEqual(synth.voice, "alex")
+
+
 class VoiceTranscriberTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

@@ -122,6 +122,15 @@ class VoiceTranscriber:
             return None
 
 
+def configured_synthesizer(config):
+    if getattr(config, "voice_mode", "rvc") == "local_tts":
+        endpoint = config.rvc_endpoint.rstrip("/") + "/v1" if config.rvc_endpoint else ""
+        return SpeechSynthesizer(endpoint, config.rvc_api_key, "local-gpt-sovits",
+                                 config.rvc_default_voice, timeout=190)
+    return SpeechSynthesizer(config.tts_endpoint, config.tts_api_key or config.api_key,
+                             config.tts_model, config.tts_voice)
+
+
 class SpeechSynthesizer:
     """OpenAI 兼容的语音合成（TTS）客户端。"""
 

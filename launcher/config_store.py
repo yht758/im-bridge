@@ -18,9 +18,22 @@ from typing import Any
 
 
 def get_root() -> Path:
-    """项目根目录：开发时是 launcher/ 的上级；打包后是 exe 所在目录。"""
+    """项目根目录。
+
+    开发时是 launcher/ 的上级；打包后 onedir 产物在 `app/IMBridgeConsole/`，
+    项目根在它的上两级。这里按标记物向上找，找不到才退回 exe 所在目录
+    （便于把整个 app 目录单独拷走时，配置就放在 exe 旁边）。
+    """
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        exe_dir = Path(sys.executable).resolve().parent
+        for candidate in (exe_dir.parent.parent, exe_dir.parent, exe_dir):
+            if (
+                (candidate / "launcher").is_dir()
+                or (candidate / ".tools" / "deploy").is_dir()
+                or (candidate / "config.example.json").is_file()
+            ):
+                return candidate
+        return exe_dir
     return Path(__file__).resolve().parent.parent
 
 
@@ -31,7 +44,7 @@ SECRET_PATH = ROOT / "config.secret.json"
 SETTINGS_PATH = ROOT / "data" / "launcher_settings.json"
 
 APP_NAME = "im-bridge-manager"
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.0.1"
 
 DEFAULTS: dict[str, Any] = {
     "base_url": "https://api.deepseek.com/v1",
@@ -53,16 +66,41 @@ DEFAULTS: dict[str, Any] = {
     "message_max_chars": 1000,
     "summary_async": True,
     "summary_token_threshold": 1800,
+    "usage_enabled": True,
     "proactive_enabled": False,
     "proactive_idle_hours": 24.0,
     "proactive_max_per_day": 1,
     "proactive_quiet_hours": "23:00-08:00",
+    "proactive_targets": [],
+    "proactive_jitter_minutes": 120,
+    "sticker_enabled": False,
+    "sticker_probability": 0.25,
+    "sticker_cooldown": 180,
+    "sticker_max_per_day": 30,
     "voice_input_enabled": False,
     "voice_reply_enabled": False,
     "asr_endpoint": "",
     "tts_endpoint": "",
+    "asr_api_key": "",
+    "tts_api_key": "",
+    "tts_model": "tts-1",
+    "tts_voice": "alloy",
     "voice_max_seconds": 60,
+    "voice_reply_probability": 0.35,
     "voice_path_map": "",
+    'voice_mode': 'local_tts',
+    'local_tts_python': '',
+    'local_tts_script': '',
+    "rvc_enabled": True,
+    "rvc_fallback": 'off',
+    "rvc_endpoint": '',
+    "rvc_default_voice": 'aemeath',
+    "rvc_index_rate": 0.75,
+    "rvc_f0_method": 'rmvpe',
+    "rvc_pitch": 0,
+    "rvc_device": 'auto',
+    "rvc_python": '',
+    "rvc_convert_script": '',
     "persona": "aemeath",
 }
 
@@ -88,21 +126,58 @@ SCHEMA: list[dict[str, Any]] = [
     {"key": "message_max_chars", "env": "AMIS_MESSAGE_MAX_CHARS", "json": "message_max_chars", "type": "int"},
     {"key": "summary_async", "env": "AMIS_SUMMARY_ASYNC", "json": "summary_async", "type": "bool"},
     {"key": "summary_token_threshold", "env": "AMIS_SUMMARY_TOKEN_THRESHOLD", "json": "summary_token_threshold", "type": "int"},
+    {"key": "usage_enabled", "env": "AMIS_USAGE_ENABLED", "json": "usage_enabled", "type": "bool"},
     {"key": "proactive_enabled", "env": "AMIS_PROACTIVE_ENABLED", "json": "proactive_enabled", "type": "bool"},
     {"key": "proactive_idle_hours", "env": "AMIS_PROACTIVE_IDLE_HOURS", "json": "proactive_idle_hours", "type": "float"},
     {"key": "proactive_max_per_day", "env": "AMIS_PROACTIVE_MAX_PER_DAY", "json": "proactive_max_per_day", "type": "int"},
     {"key": "proactive_quiet_hours", "env": "AMIS_PROACTIVE_QUIET_HOURS", "json": "proactive_quiet_hours", "type": "str"},
+    {"key": "proactive_targets", "env": "AMIS_PROACTIVE_TARGETS", "json": "proactive_targets", "type": "list"},
+    {"key": "sticker_enabled", "env": "AMIS_STICKER_ENABLED", "json": "sticker_enabled", "type": "bool"},
+    {"key": "sticker_probability", "env": "AMIS_STICKER_PROBABILITY", "json": "sticker_probability", "type": "float"},
+    {"key": "sticker_cooldown", "env": "AMIS_STICKER_COOLDOWN", "json": "sticker_cooldown", "type": "int"},
+    {"key": "sticker_max_per_day", "env": "AMIS_STICKER_MAX_PER_DAY", "json": "sticker_max_per_day", "type": "int"},
+    {"key": "proactive_jitter_minutes", "env": "AMIS_PROACTIVE_JITTER_MINUTES", "json": "proactive_jitter_minutes", "type": "int"},
     {"key": "voice_input_enabled", "env": "AMIS_VOICE_INPUT_ENABLED", "json": "voice_input_enabled", "type": "bool"},
     {"key": "voice_reply_enabled", "env": "AMIS_VOICE_REPLY_ENABLED", "json": "voice_reply_enabled", "type": "bool"},
     {"key": "asr_endpoint", "env": "AMIS_ASR_ENDPOINT", "json": "asr_endpoint", "type": "str"},
+    {"key": "voice_reply_probability", "env": "AMIS_VOICE_REPLY_PROBABILITY", "json": "voice_reply_probability", "type": "float"},
     {"key": "tts_endpoint", "env": "AMIS_TTS_ENDPOINT", "json": "tts_endpoint", "type": "str"},
+    {"key": "asr_api_key", "env": "AMIS_ASR_API_KEY", "json": "asr_api_key", "type": "secret"},
+    {"key": "tts_api_key", "env": "AMIS_TTS_API_KEY", "json": "tts_api_key", "type": "secret"},
+    {"key": "tts_model", "env": "AMIS_TTS_MODEL", "json": "tts_model", "type": "str"},
+    {"key": "tts_voice", "env": "AMIS_TTS_VOICE", "json": "tts_voice", "type": "str"},
     {"key": "voice_max_seconds", "env": "AMIS_VOICE_MAX_SECONDS", "json": "voice_max_seconds", "type": "int"},
     {"key": "voice_path_map", "env": "AMIS_VOICE_PATH_MAP", "json": "voice_path_map", "type": "str"},
+    {'key': 'voice_mode', 'env': 'AMIS_VOICE_MODE', 'json': 'voice_mode', 'type': 'str'},
+    {'key': 'local_tts_python', 'env': 'AMIS_LOCAL_TTS_PYTHON', 'json': 'local_tts_python', 'type': 'str'},
+    {'key': 'local_tts_script', 'env': 'AMIS_LOCAL_TTS_SCRIPT', 'json': 'local_tts_script', 'type': 'str'},
+    {'key': 'rvc_enabled', 'env': 'AMIS_RVC_ENABLED', 'json': 'rvc_enabled', 'type': 'bool'},
+    {'key': 'rvc_fallback', 'env': 'AMIS_RVC_FALLBACK', 'json': 'rvc_fallback', 'type': 'str'},
+    {'key': 'rvc_endpoint', 'env': 'AMIS_RVC_ENDPOINT', 'json': 'rvc_endpoint', 'type': 'str'},
+    {'key': 'rvc_api_key', 'env': 'AMIS_RVC_API_KEY', 'json': 'rvc_api_key', 'type': 'secret'},
+    {'key': 'rvc_default_voice', 'env': 'AMIS_RVC_DEFAULT_VOICE', 'json': 'rvc_default_voice', 'type': 'str'},
+    {'key': 'rvc_index_rate', 'env': 'AMIS_RVC_INDEX_RATE', 'json': 'rvc_index_rate', 'type': 'float'},
+    {'key': 'rvc_f0_method', 'env': 'AMIS_RVC_F0_METHOD', 'json': 'rvc_f0_method', 'type': 'str'},
+    {'key': 'rvc_pitch', 'env': 'AMIS_RVC_PITCH', 'json': 'rvc_pitch', 'type': 'int'},
+    {'key': 'rvc_device', 'env': 'AMIS_RVC_DEVICE', 'json': 'rvc_device', 'type': 'str'},
+    {'key': 'rvc_python', 'env': 'AMIS_RVC_PYTHON', 'json': 'rvc_python', 'type': 'str'},
+    {'key': 'rvc_convert_script', 'env': 'AMIS_RVC_CONVERT_SCRIPT', 'json': 'rvc_convert_script', 'type': 'str'},
+    {"key": "image_input_enabled", "env": "AMIS_IMAGE_INPUT_ENABLED", "json": "image_input_enabled", "type": "bool"},
+    {"key": "vision_model", "env": "AMIS_VISION_MODEL", "json": "vision_model", "type": "str"},
+    {"key": "vision_max_bytes", "env": "AMIS_VISION_MAX_BYTES", "json": "vision_max_bytes", "type": "int"},
     {"key": "persona", "env": "AMIS_PERSONA", "json": "persona", "type": "str"},
 ]
 
+DEFAULTS.update(image_input_enabled=True, vision_model="", vision_max_bytes=10485760)
+# Public distribution starts without a server, provider, model, voice or local paths.
+from ui.edition import IS_PERSONAL
+if not IS_PERSONAL:
+    DEFAULTS.update(base_url="", model="", bot_qq=0, asr_endpoint="", tts_endpoint="",
+                    tts_model="", tts_voice="", rvc_enabled=False, rvc_default_voice="",
+                    rvc_python="", rvc_convert_script="", local_tts_python="", local_tts_script="")
+
 _SCHEMA_BY_KEY = {spec["key"]: spec for spec in SCHEMA}
-_NON_SECRET_ENVS = {spec["env"] for spec in SCHEMA if spec["key"] != "api_key"}
+_NON_SECRET_ENVS = {spec["env"] for spec in SCHEMA if spec["type"] != "secret"}
 _TRUE_SET = {"1", "true", "yes", "on", "y", "t"}
 _FALSE_SET = {"0", "false", "no", "off", "n", "f"}
 
@@ -290,14 +365,14 @@ def load_config(
 
     for spec in SCHEMA:
         key = spec["key"]
-        if key == "api_key":
+        if spec["type"] == "secret":
             value = ""
             source = "default"
             for candidate, label in (
                 (os.environ.get(spec["env"]), "环境变量"),
                 (env_file.get(spec["env"]), ".env"),
-                (secret_json.get("api_key"), "config.secret.json"),
-                (config_json.get("api_key"), "config.json"),
+                (secret_json.get(key), "config.secret.json"),
+                (config_json.get(key), "config.json"),
             ):
                 if candidate:
                     value = str(candidate).strip()
@@ -438,11 +513,22 @@ def validate_values(values: dict[str, Any]) -> list[str]:
                 proactive_idle_hours=float(values.get("proactive_idle_hours", 24) or 0),
                 proactive_max_per_day=int(values.get("proactive_max_per_day", 1) or 0),
                 proactive_quiet_hours=str(values.get("proactive_quiet_hours") or ""),
+                proactive_targets=list(values.get("proactive_targets") or []),
+                proactive_jitter_minutes=int(values.get("proactive_jitter_minutes", 120) or 0),
+                sticker_enabled=bool(values.get("sticker_enabled", False)),
+                sticker_probability=float(values.get("sticker_probability", 0.25) or 0),
+                sticker_cooldown=int(values.get("sticker_cooldown", 180) or 0),
+                sticker_max_per_day=int(values.get("sticker_max_per_day", 30) or 0),
                 voice_input_enabled=bool(values.get("voice_input_enabled", False)),
                 voice_reply_enabled=bool(values.get("voice_reply_enabled", False)),
                 asr_endpoint=str(values.get("asr_endpoint") or ""),
                 tts_endpoint=str(values.get("tts_endpoint") or ""),
+                asr_api_key=str(values.get("asr_api_key") or ""),
+                tts_api_key=str(values.get("tts_api_key") or ""),
+                tts_model=str(values.get("tts_model") or "tts-1"),
+                tts_voice=str(values.get("tts_voice") or "alloy"),
                 voice_max_seconds=int(values.get("voice_max_seconds", 60) or 60),
+                voice_reply_probability=float(values.get("voice_reply_probability", 0.35) or 0),
                 voice_path_map=str(values.get("voice_path_map") or ""),
                 persona=str(values.get("persona") or ""),
             )
@@ -493,6 +579,9 @@ def save_config(
     env_remove: set[str] = set(_NON_SECRET_ENVS)
     if new_key:
         env_updates["AMIS_API_KEY"] = new_key
+    for spec in SCHEMA:
+        if spec["type"] == "secret" and payload.get(spec["key"]):
+            env_updates[spec["env"]] = str(payload[spec["key"]]).strip()
     update_env_file(env_updates, env_remove)
 
     # 2) 其余配置写 config.json，保留未知字段
@@ -502,7 +591,7 @@ def save_config(
     warnings: list[str] = []
     for spec in SCHEMA:
         key = spec["key"]
-        if spec["json"] is None or key not in payload:
+        if spec["type"] == "secret" or spec["json"] is None or key not in payload:
             continue
         value = coerce(spec, payload[key])
         config_json[spec["json"]] = value
@@ -525,6 +614,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "port": 8765,
     "theme": "dark",
     "napcat_update_mirror": "",
+    # 远程模式：桌面端通过 SSH 管理云服务器
+    "remote_host": "",
+    "remote_user": "root",
+    "remote_port": 22,
+    "remote_key": "",
+    "remote_path": "/opt/im-bridge",
 }
 
 

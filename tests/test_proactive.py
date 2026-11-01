@@ -60,10 +60,12 @@ class FakeLLM:
         self.text = text
         self.fail_for = set(fail_for or ())
         self.calls = 0
+        self.seen: list[str] = []
 
     async def complete(self, messages, **kwargs) -> str:
         self.calls += 1
         system = str(messages[0].get("content", "")) if messages else ""
+        self.seen.append(system)
         for nickname in self.fail_for:
             if nickname in system:
                 raise LLMError("假 LLM 故障")
@@ -102,6 +104,9 @@ class ProactiveSchedulerTest(unittest.IsolatedAsyncioTestCase):
             "proactive_idle_hours": 24.0,
             "proactive_max_per_day": 1,
             "proactive_quiet_hours": "23:00-08:00",
+            # 老用例默认全量对象、零随机延迟，保持确定性
+            "proactive_targets": ["10001", "10002"],
+            "proactive_jitter_minutes": 0,
         }
         params.update(overrides)
         return Config(**params)
@@ -148,6 +153,66 @@ class ProactiveSchedulerTest(unittest.IsolatedAsyncioTestCase):
         scheduler = self.make_scheduler()
 
         self.assertEqual(await scheduler.tick(), [])
+
+    # ---------- 对象名单 ----------
+    async def test_only_targets_receive_messages(self) -> None:
+        self.add_user("10001", beijing_ts(12, 0) - 100 * 3600, "小满")
+        self.add_user("10003", beijing_ts(12, 0) - 100 * 3600, "路人")
+        scheduler = self.make_scheduler(proactive_targets=["10001"])
+
+        result = await scheduler.tick()
+
+        self.assertEqual(result, ["10001"])
+        self.assertEqual([item[0] for item in self.transport.sent], [10001])
+
+    async def test_empty_targets_sends_nothing(self) -> None:
+        self.add_user("10001", beijing_ts(12, 0) - 100 * 3600, "小满")
+        scheduler = self.make_scheduler(proactive_targets=[])
+
+        self.assertEqual(await scheduler.tick(), [])
+        self.assertEqual(self.transport.sent, [])
+        self.assertEqual(self.llm.calls, 0)
+
+    # ---------- 随机延迟 ----------
+    async def test_jitter_delays_until_due_time(self) -> None:
+        self.add_user("10001", beijing_ts(12, 0) - 100 * 3600, "小满")
+        scheduler = self.make_scheduler(proactive_jitter_minutes=120, proactive_max_per_day=3)
+        # 固定摇出 90 分钟
+        scheduler._rng = type("FixedRandom", (), {"uniform": lambda _self, a, b: 90 * 60})()
+
+        self.assertEqual(await scheduler.tick(), [])  # 刚进入可发窗口，先等到期
+
+        self.clock.advance(89 * 60)
+        self.assertEqual(await scheduler.tick(), [])
+
+        self.clock.advance(2 * 60)
+        self.assertEqual(await scheduler.tick(), ["10001"])
+
+    async def test_jitter_rerolls_after_user_chats_again(self) -> None:
+        self.add_user("10001", beijing_ts(12, 0) - 100 * 3600, "小满")
+        scheduler = self.make_scheduler(proactive_jitter_minutes=120, proactive_max_per_day=3)
+        scheduler._rng = type("FixedRandom", (), {"uniform": lambda _self, a, b: 60 * 60})()
+
+        self.assertEqual(await scheduler.tick(), [])  # 摇出 60 分钟后发
+
+        # 中途用户又说话了：窗口应作废
+        state = self.state.get("10001")
+        state.last_interact_ts = self.clock.ts
+        self.assertEqual(await scheduler.tick(), [])
+
+        self.clock.advance(100 * 3600)  # 再次满足闲置
+        self.assertEqual(await scheduler.tick(), [])  # 重新摇，不立刻发
+        self.clock.advance(61 * 60)
+        self.assertEqual(await scheduler.tick(), ["10001"])
+
+    async def test_opener_prompt_mentions_gap(self) -> None:
+        self.add_user("10001", beijing_ts(12, 0) - 50 * 3600, "小满")
+        scheduler = self.make_scheduler()
+
+        await scheduler.tick()
+
+        self.assertTrue(self.llm.seen, "应当调用过一次开场白生成")
+        self.assertIn("大约 2 天前", self.llm.seen[-1])
 
     # ---------- 静默时段（跨零点） ----------
     async def test_quiet_hours_cross_midnight_blocks_late_night(self) -> None:
