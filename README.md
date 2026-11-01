@@ -2,7 +2,7 @@
 
 Windows 桌面控制台，用于连接服务器、配置 AI、管理 NapCat 和 QQ Bot。
 
-**当前版本：3.0.1** · [下载 Windows x64 控制台](https://github.com/yht758/im-bridge/releases/download/v3.0.1/im-bridge-console-v3.0.1-win-x64.zip) · [全部发布](https://github.com/yht758/im-bridge/releases) · [使用说明](docs/DESKTOP.md)
+**当前版本：3.0.2** · [下载 Windows x64 控制台](https://github.com/yht758/im-bridge/releases/download/v3.0.2/im-bridge-console-v3.0.2-win-x64.zip) · [全部发布](https://github.com/yht758/im-bridge/releases) · [使用说明](docs/DESKTOP.md)
 
 ## 可以做什么
 

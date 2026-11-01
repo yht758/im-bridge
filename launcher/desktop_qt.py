@@ -1785,7 +1785,7 @@ class ConsoleWindow(QMainWindow):
             # Fail before starting anything if server code has not been upgraded yet.
             import shlex
             script = "from im_bridge.config import FIELD_BY_KEY; assert 'rvc_endpoint' in FIELD_BY_KEY"
-            code, _ = remote.run("cd " + shlex.quote(cfg["dir"]) + " && " + remote.REMOTE_PYTHON
+            code, _ = remote.run("cd " + shlex.quote(cfg["dir"]) + " && PYTHONPATH=src " + remote.REMOTE_PYTHON
                                  + " -c " + shlex.quote(script), cfg=cfg)
             if code:
                 raise RuntimeError("云端代码尚未支持 RVC 桥接，请先更新云端程序")
@@ -1812,7 +1812,7 @@ class ConsoleWindow(QMainWindow):
 
         def failed(message):
             panel.busy(False)
-            panel.status.setText(message)
+            panel.show_error(message)
             self.toast(message, "err")
 
         run_async(work, done, failed)

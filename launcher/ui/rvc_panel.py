@@ -8,6 +8,7 @@ class RvcPanel(QWidget):
     def __init__(self, page):
         super().__init__()
         self.page = page
+        self._error = ""
         box = QVBoxLayout(self)
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(12)
@@ -40,12 +41,20 @@ class RvcPanel(QWidget):
         self.timer.timeout.connect(self.refresh)
         self.timer.start(2000)
 
+    def show_error(self, message):
+        self._error = message
+        self.status.setText(message)
+
     def refresh(self):
+        if self._error:
+            return
         session = getattr(self.page.win, "rvc_session", None)
         if session:
             self.status.setText(session.snapshot())
 
     def busy(self, busy):
+        if busy:
+            self._error = ""
         self.connect_btn.setEnabled(not busy)
         self.stop_btn.setEnabled(not busy)
         self.preview_btn.setEnabled(not busy)

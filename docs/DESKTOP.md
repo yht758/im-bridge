@@ -4,7 +4,7 @@
 
 ## 下载与打开
 
-下载 [Windows x64 控制台](https://github.com/yht758/im-bridge/releases/download/v3.0.1/im-bridge-console-v3.0.1-win-x64.zip)，解压完整文件夹，运行 `IMBridgeConsole.exe`。`_internal` 文件夹是程序运行依赖，请与 exe 保持在同一目录。
+下载 [Windows x64 控制台](https://github.com/yht758/im-bridge/releases/download/v3.0.2/im-bridge-console-v3.0.2-win-x64.zip)，解压完整文件夹，运行 `IMBridgeConsole.exe`。`_internal` 文件夹是程序运行依赖，请与 exe 保持在同一目录。
 
 控制台无需额外安装 Python。连接服务器需要 Windows OpenSSH 客户端。公开下载包不含服务器档案、QQ 账号、API Key、SSH 私钥、语音权重或已配置音色。
 

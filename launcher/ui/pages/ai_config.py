@@ -471,7 +471,9 @@ class AIConfigPage(QWidget):
         self._raw = dict(config or {})
         self._loading = True
         for key, (control, kind) in self._controls.items():
-            value = self._raw.get(key, config_store.DEFAULTS.get(key))
+            value = self._raw.get(key)
+            if value is None or value == "":
+                value = config_store.DEFAULTS.get(key)
             if kind == "bool":
                 control.setChecked(_truthy(value))
                 continue

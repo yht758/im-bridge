@@ -811,52 +811,8 @@ class RemoteBotManager:
         return result
 
     def status(self, force: bool = False) -> dict[str, Any]:
-        now = time.time()
-        if not force and self._status_cache and now - self._status_cache[0] < 2.0:
-            return dict(self._status_cache[1])
-
-        cmd = (
-            f"state=$(systemctl is-active {self.service} 2>/dev/null); "
-            f"enabled=$(systemctl is-enabled {self.service} 2>/dev/null); "
-            f"pid=$(systemctl show -p MainPID --value {self.service} 2>/dev/null); "
-            f"up=$(ps -o etimes= -p $pid 2>/dev/null | tr -d ' '); "
-            'echo "$state|$enabled|$pid|$up"; '
-            + _metric_cmd()
-        )
-        try:
-            _code, out = run(cmd, timeout=25)
-        except RemoteError as exc:
-            return {
-                "status": {
-                    "running": False, "pid": None, "uptime": 0.0, "service": "unknown",
-                    "auto_restart": self._auto_restart, "error": str(exc),
-                },
-                "metrics": {"ok": False, "error": str(exc)},
-            }
-
-        lines = (out or "").splitlines()
-        head = lines[0] if lines else "|"
-        parts = head.split("|")
-        while len(parts) < 4:
-            parts.append("")
-        state, enabled, pid, uptime = parts[0], parts[1], parts[2], parts[3]
-        running = state.strip() == "active"
-        status = {
-            "running": running,
-            "pid": int(pid) if pid.strip().isdigit() else None,
-            "started_at": (time.time() - int(uptime)) if (running and uptime.strip().isdigit()) else None,
-            "uptime": float(uptime) if uptime.strip().isdigit() else 0.0,
-            "exit_code": None,
-            "auto_restart": self._auto_restart,
-            "python": "/opt/im-bridge/.venv/bin/python",
-            "mode": "remote",
-            "service": state.strip() or "unknown",
-            "enabled": enabled.strip() == "enabled",
-        }
-        metrics = _parse_metrics("\n".join(lines[1:]))
-        result = {"status": status, "metrics": metrics}
-        self._snapshot_cache = (now, dict(result))
-        return result
+        """Return the flat BotManager status contract; metrics belong to host_snapshot."""
+        return dict(self.host_snapshot(force=force)["status"])
 
     def set_auto_restart(self, enabled: bool) -> None:
         with self._lock:
